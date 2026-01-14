@@ -1,3 +1,3 @@
 colorama
-seahorse==1.2.0
+seahorse>=1.2.1
 numpy
