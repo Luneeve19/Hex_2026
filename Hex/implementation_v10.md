@@ -29,6 +29,6 @@ La détection se fait en temps constant $O(1)$ à l'intérieur de la boucle de p
 - **Pas de surcoût** : Contrairement à une analyse de pattern séparée qui scannerait tout le plateau, cette vérification n'est faite que lorsque le front de recherche (Dijkstra) approche naturellement du bord.
 - **Robutesse** : Le code vérifie non seulement que les cases sont vides, mais aussi qu'elles n'appartiennent pas à l'adversaire, garantissant que le "template" n'est pas brisé.
 
-## 4. Conclusion sur la V5
+## 4. Conclusion sur la V10
 
 Avec cette amélioration, l'agent ne se contente plus de chercher un chemin : il optimise ses ressources. Il sait ignorer les batailles déjà gagnées sur les bords pour concentrer toute sa profondeur de calcul (Alpha-Beta) sur le centre et les zones de conflit actif. C'est un comportement typique des joueurs de niveau expert.
