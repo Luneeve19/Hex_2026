@@ -1,208 +1,173 @@
 import heapq
+import time
 from player_hex import PlayerHex
 from seahorse.game.action import Action
 from game_state_hex import GameStateHex
-from seahorse.utils.custom_exceptions import MethodNotImplementedError
 
 class MyPlayer(PlayerHex):
     """
-    Player class Version 6: V4 Base + Panic Border Defense.
-    Detects if opponent is close to a border and prioritizes building a wall.
+    Agent de base "Back to Basics".
+    - Minimax + Alpha-Bêta pur.
+    - Heuristique : Différence des plus courts chemins (Dijkstra basique).
+    - Aucun artifice de Move Ordering ou de Table de Transposition.
     """
 
-    def __init__(self, piece_type: str, name: str = "MyPlayer"):
+    def __init__(self, piece_type: str, name: str = "BaseAgent"):
         super().__init__(piece_type, name)
-        self.bridge_data = [
-            ((-1, 2), ((0, 1), (-1, 1))),
-            ((1, 1), ((0, 1), (1, 0))),
-            ((2, -1), ((1, 0), (1, -1))),
-            ((1, -2), ((0, -1), (1, -1))),
-            ((-1, -1), ((0, -1), (-1, 0))),
-            ((-2, 1), ((-1, 0), (-1, 1)))
-        ]
 
     def compute_action(self, current_state: GameStateHex, remaining_time: float = 15*60, **kwargs) -> Action:
-        _, best_action = self.alpha_beta(current_state, 2, float("-inf"), float("inf"), True)
+        # On se donne un temps fixe simple (ex: 5 secondes) pour ne pas épuiser les 15 minutes[cite: 50, 51].
+        start_time = time.time()
+        time_limit = start_time + 5.0 
+        
+        actions = list(current_state.generate_possible_stateful_actions())
+        if not actions:
+            raise ValueError("Aucune action possible")
+
+        best_action = actions[0]
+        
+        # Approfondissement itératif très basique (profondeur 1, puis 2, puis 3)
+        try:
+            for depth in range(1, 4): # On bloque à 3 pour s'assurer que l'agent répond vite
+                if time.time() > time_limit:
+                    break
+                
+                val, action = self.alpha_beta(
+                    current_state, depth, float("-inf"), float("inf"), 
+                    True, time_limit
+                )
+                if action:
+                    best_action = action
+                    
+        except TimeoutError:
+            pass # Si on manque de temps, on garde le meilleur coup de l'itération précédente
+
         return best_action
 
-    def alpha_beta(self, state: GameStateHex, depth: int, alpha: float, beta: float, maximizing_player: bool) -> tuple[float, Action]:
+    def alpha_beta(self, state: GameStateHex, depth: int, alpha: float, beta: float, 
+                   maximizing_player: bool, time_limit: float) -> tuple[float, Action]:
+        
+        # Arrêt d'urgence si on dépasse le temps
+        if time.time() > time_limit:
+            raise TimeoutError()
+
+        # Condition d'arrêt : profondeur atteinte ou fin de partie
         if depth == 0 or state.is_done():
             return self.heuristic(state), None
 
         actions = list(state.generate_possible_stateful_actions())
-        
-        # --- MOVE ORDERING (CRITICALITY) ---
-        crit_map = self._get_criticality_map(state)
-        def score_action(action):
-            curr_env = state.get_rep().get_env()
-            next_env = action.get_next_game_state().get_rep().get_env()
-            for pos in next_env:
-                if pos not in curr_env:
-                    return crit_map.get(pos, 0)
-            return 0
-        actions.sort(key=score_action, reverse=True)
+        best_action = actions[0] if actions else None
 
-        best_action = None
         if maximizing_player:
             max_eval = float("-inf")
             for action in actions:
                 next_state = action.get_next_game_state()
-                eval_val, _ = self.alpha_beta(next_state, depth - 1, alpha, beta, False)
+                eval_val, _ = self.alpha_beta(next_state, depth - 1, alpha, beta, False, time_limit)
+                
                 if eval_val > max_eval:
                     max_eval = eval_val
                     best_action = action
                 alpha = max(alpha, eval_val)
-                if beta <= alpha: break
+                if beta <= alpha: 
+                    break # Élagage Bêta
             return max_eval, best_action
+            
         else:
             min_eval = float("inf")
             for action in actions:
                 next_state = action.get_next_game_state()
-                eval_val, _ = self.alpha_beta(next_state, depth - 1, alpha, beta, True)
+                eval_val, _ = self.alpha_beta(next_state, depth - 1, alpha, beta, True, time_limit)
+                
                 if eval_val < min_eval:
                     min_eval = eval_val
                     best_action = action
                 beta = min(beta, eval_val)
-                if beta <= alpha: break
+                if beta <= alpha: 
+                    break # Élagage Alpha
             return min_eval, best_action
 
     def heuristic(self, state: GameStateHex) -> float:
+        """
+        Heuristique stricte : (Distance de l'Adversaire) - (Ma Distance).
+        Plus l'adversaire est loin de connecter et plus je suis proche, meilleur est le score.
+        """
         if state.is_done():
             scores = state.get_scores()
-            my_id = self.get_id()
-            my_score = scores.get(my_id, 0)
-            opp_score = sum(scores.values()) - my_score
-            return (my_score - opp_score) * 20000
+            my_score = scores.get(self.get_id(), 0)
+            # Victoire = score infini, Défaite = score -infini
+            return float("inf") if my_score > 0 else float("-inf")
 
         my_piece = self.get_piece_type()
         opp_piece = "B" if my_piece == "R" else "R"
 
-        # 1. Base Dijkstra with Bridges
-        d_moi = self._get_shortest_path_distance(state, my_piece)
-        d_adv = self._get_shortest_path_distance(state, opp_piece)
+        my_dist = self.dijkstra(state, my_piece)
+        opp_dist = self.dijkstra(state, opp_piece)
 
-        if d_moi == float("inf"): return -10000
-        if d_adv == float("inf"): return 10000
+        # Si un chemin est complètement bloqué, on pénalise lourdement
+        if my_dist >= 999: return -50000
+        if opp_dist >= 999: return 50000
 
-        score = (d_adv - d_moi) * 100
+        return opp_dist - my_dist
 
-        # 2. PANIC MODE: Border Defense
-        # If opponent is very close to a border (dist <= 2), increase defensive priority
-        panic_penalty = self._get_panic_bonus(state, opp_piece)
-        
-        return score - panic_penalty
-
-    def _get_panic_bonus(self, state, opp_piece):
+    def dijkstra(self, state: GameStateHex, piece_type: str) -> float:
         """
-        Detects if opponent pieces are dangerously close to their target borders.
-        Red (R) targets row 0 and row dim-1.
-        Blue (B) targets col 0 and col dim-1.
+        Algorithme de Dijkstra brut pour trouver le plus court chemin.
+        Coût : 0 si c'est notre pièce, 1 si case vide. Murs = pièces adverses.
         """
         board = state.get_rep()
         env = board.get_env()
         rows, cols = board.get_dimensions()
-        penalty = 0
-
-        for (r, c), piece in env.items():
-            if piece.get_type() == opp_piece:
-                if opp_piece == "R":
-                    # Red targets rows 0 and rows-1
-                    dist_to_top = r
-                    dist_to_bot = (rows - 1) - r
-                    if dist_to_top <= 1: penalty += 500
-                    if dist_to_bot <= 1: penalty += 500
-                else:
-                    # Blue targets cols 0 and cols-1
-                    dist_to_left = c
-                    dist_to_right = (cols - 1) - c
-                    if dist_to_left <= 1: penalty += 500
-                    if dist_to_right <= 1: penalty += 500
         
-        return penalty
+        pq = []
+        dist_map = {}
 
-    def _get_criticality_map(self, state: GameStateHex) -> dict:
-        board = state.get_rep()
-        rows, cols = board.get_dimensions()
-        d_top = self._dijkstra_from_side(state, "R", "START")
-        d_bot = self._dijkstra_from_side(state, "R", "END")
-        d_left = self._dijkstra_from_side(state, "B", "START")
-        d_right = self._dijkstra_from_side(state, "B", "END")
-        crit_map = {}
-        for r in range(rows):
+        # 1. Initialisation de la ligne/colonne de départ
+        if piece_type == "R":
+            # Le joueur Rouge veut relier le Haut (ligne 0) au Bas (ligne rows-1) [cite: 20, 21]
             for c in range(cols):
-                if (r, c) not in board.get_env():
-                    r_score = d_top.get((r, c), 99) + d_bot.get((r, c), 99)
-                    b_score = d_left.get((r, c), 99) + d_right.get((r, c), 99)
-                    crit_map[(r, c)] = -(r_score + b_score)
-        return crit_map
-
-    def _dijkstra_from_side(self, state, piece_type, side):
-        board = state.get_rep()
-        env = board.get_env()
-        rows, cols = board.get_dimensions()
-        pq, dist = [], {}
-        if piece_type == "R":
-            row = 0 if side == "START" else rows - 1
-            for j in range(cols):
-                p = env.get((row, j))
-                d = 1 if p is None else (0 if p.get_type() == "R" else None)
-                if d is not None: dist[(row, j)] = d; heapq.heappush(pq, (d, row, j))
+                p = env.get((0, c))
+                cost = 1 if p is None else (0 if p.get_type() == "R" else None)
+                if cost is not None:
+                    dist_map[(0, c)] = cost
+                    heapq.heappush(pq, (cost, 0, c))
         else:
-            col = 0 if side == "START" else cols - 1
-            for i in range(rows):
-                p = env.get((i, col))
-                d = 1 if p is None else (0 if p.get_type() == "B" else None)
-                if d is not None: dist[(i, col)] = d; heapq.heappush(pq, (d, i, col))
+            # Le joueur Bleu veut relier la Gauche (colonne 0) à la Droite (colonne cols-1) [cite: 20, 21]
+            for r in range(rows):
+                p = env.get((r, 0))
+                cost = 1 if p is None else (0 if p.get_type() == "B" else None)
+                if cost is not None:
+                    dist_map[(r, 0)] = cost
+                    heapq.heappush(pq, (cost, r, 0))
+
+        # 2. Propagation
         while pq:
             d, r, c = heapq.heappop(pq)
-            if d > dist.get((r, c), float("inf")): continue
-            for _, (_, (nr, nc)) in board.get_neighbours(r, c).items():
-                if 0 <= nr < rows and 0 <= nc < cols:
-                    p = env.get((nr, nc))
-                    if p is None: weight = 1
-                    elif p.get_type() == piece_type: weight = 0
-                    else: continue
-                    if d + weight < dist.get((nr, nc), float("inf")):
-                        dist[(nr, nc)] = d + weight; heapq.heappush(pq, (d + weight, nr, nc))
-        return dist
 
-    def _get_shortest_path_distance(self, state, piece_type):
-        board = state.get_rep()
-        env = board.get_env()
-        rows, cols = board.get_dimensions()
-        pq, dist_map = [], {}
-        if piece_type == "R":
-            for j in range(cols):
-                piece = env.get((0, j))
-                d = 1 if piece is None else (0 if piece.get_type() == "R" else None)
-                if d is not None: dist_map[(0, j)] = d; heapq.heappush(pq, (d, 0, j))
-        else:
-            for i in range(rows):
-                piece = env.get((i, 0))
-                d = 1 if piece is None else (0 if piece.get_type() == "B" else None)
-                if d is not None: dist_map[(i, 0)] = d; heapq.heappush(pq, (d, i, 0))
-        while pq:
-            d, r, c = heapq.heappop(pq)
-            if d > dist_map.get((r, c), float("inf")): continue
-            if (piece_type == "R" and r == rows - 1) or (piece_type == "B" and c == cols - 1): return d
+            # Si on a déjà trouvé un chemin plus court vers cette case, on ignore
+            if d > dist_map.get((r, c), float("inf")):
+                continue
+
+            # Condition de victoire atteinte
+            if piece_type == "R" and r == rows - 1:
+                return d
+            if piece_type == "B" and c == cols - 1:
+                return d
+
+            # Voisins classiques [cite: 97]
             for _, (_, (nr, nc)) in board.get_neighbours(r, c).items():
                 if 0 <= nr < rows and 0 <= nc < cols:
                     np = env.get((nr, nc))
-                    if np is None: weight = 1
-                    elif np.get_type() == piece_type: weight = 0
-                    else: continue
-                    if d + weight < dist_map.get((nr, nc), float("inf")):
-                        dist_map[(nr, nc)] = d + weight; heapq.heappush(pq, (d + weight, nr, nc))
-            for (dr, dc), shared in self.bridge_data:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < rows and 0 <= nc < cols:
-                    s1r, s1c, s2r, s2c = r+shared[0][0], c+shared[0][1], r+shared[1][0], c+shared[1][1]
-                    if (0 <= s1r < rows and 0 <= s1c < cols and env.get((s1r, s1c)) is None and
-                        0 <= s2r < rows and 0 <= s2c < cols and env.get((s2r, s2c)) is None):
-                        np = env.get((nr, nc))
-                        if np is None: weight = 1
-                        elif np.get_type() == piece_type: weight = 0
-                        else: continue
-                        if d + weight < dist_map.get((nr, nc), float("inf")):
-                            dist_map[(nr, nc)] = d + weight; heapq.heappush(pq, (d + weight, nr, nc))
-        return float("inf")
+                    
+                    if np is None:
+                        weight = 1
+                    elif np.get_type() == piece_type:
+                        weight = 0
+                    else:
+                        continue # Pièce adverse, on ne peut pas passer
+                        
+                    new_dist = d + weight
+                    if new_dist < dist_map.get((nr, nc), float("inf")):
+                        dist_map[(nr, nc)] = new_dist
+                        heapq.heappush(pq, (new_dist, nr, nc))
+
+        return 999 # Aucun chemin trouvé (bloqué)
